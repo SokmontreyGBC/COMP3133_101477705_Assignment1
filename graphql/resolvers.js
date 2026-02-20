@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { User } = require('../models/User');
-const { Employee } = require('../models/Employee');
+const User = require('../models/User');
+const Employee = require('../models/Employee');
 const { UserInputError } = require('apollo-server-express');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
