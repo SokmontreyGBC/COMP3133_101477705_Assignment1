@@ -26,51 +26,47 @@ function validateSignup({ username, email, password }) {
   if (errors.length) throw new UserInputError('Validation failed', { errors });
 }
 
-async function signup(_, { input }) {
-  validateSignup(input);
-  const { username, email, password } = input;
-  const existing = await User.findOne({
-    $or: [{ username: username.trim() }, { email: email.trim().toLowerCase() }],
-  });
-  if (existing) {
-    throw new UserInputError('Username or email already registered');
-  }
-  const hashed = await bcrypt.hash(password, 10);
-  const user = await User.create({
-    username: username.trim(),
-    email: email.trim().toLowerCase(),
-    password: hashed,
-  });
-  const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
-  return { token, user: toGraphQLUser(user) };
-}
-
-async function login(_, { usernameOrEmail, password }) {
-  if (!usernameOrEmail?.trim() || !password) {
-    throw new UserInputError('Username/email and password are required');
-  }
-  const key = usernameOrEmail.trim();
-  const isEmail = key.includes('@');
-  const user = await User.findOne(
-    isEmail ? { email: key.toLowerCase() } : { username: key }
-  );
-  if (!user) {
-    throw new UserInputError('Invalid username/email or password');
-  }
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) {
-    throw new UserInputError('Invalid username/email or password');
-  }
-  const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
-  return { token, user: toGraphQLUser(user) };
-}
-
 const resolvers = {
   Query: {
-    login,
+    async login(_, { usernameOrEmail, password }) {
+      if (!usernameOrEmail?.trim() || !password) {
+        throw new UserInputError('Username/email and password are required');
+      }
+      const key = usernameOrEmail.trim();
+      const isEmail = key.includes('@');
+      const user = await User.findOne(
+        isEmail ? { email: key.toLowerCase() } : { username: key }
+      );
+      if (!user) {
+        throw new UserInputError('Invalid username/email or password');
+      }
+      const valid = await bcrypt.compare(password, user.password);
+      if (!valid) {
+        throw new UserInputError('Invalid username/email or password');
+      }
+      const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
+      return { token, user: toGraphQLUser(user) };
+    },
   },
   Mutation: {
-    signup,
+    async signup(_, { input }) {
+      validateSignup(input);
+      const { username, email, password } = input;
+      const existing = await User.findOne({
+        $or: [{ username: username.trim() }, { email: email.trim().toLowerCase() }],
+      });
+      if (existing) {
+        throw new UserInputError('Username or email already registered');
+      }
+      const hashed = await bcrypt.hash(password, 10);
+      const user = await User.create({
+        username: username.trim(),
+        email: email.trim().toLowerCase(),
+        password: hashed,
+      });
+      const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
+      return { token, user: toGraphQLUser(user) };
+    },
   },
 };
 
