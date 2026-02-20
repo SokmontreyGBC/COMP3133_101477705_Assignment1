@@ -4,9 +4,14 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const Employee = require('../models/Employee');
 const { UserInputError } = require('apollo-server-express');
+const {
+  validateLoginInput,
+  validateSignupInput,
+  validateAddEmployeeInput,
+  validateUpdateEmployeeInput,
+} = require('./validators');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
-const { GENDER_ENUM } = require('../models/Employee');
 
 function toGraphQLUser(doc) {
   if (!doc) return null;
@@ -37,49 +42,24 @@ function toGraphQLEmployee(doc) {
   };
 }
 
-function validateAddEmployee(input) {
-  const errors = [];
-  if (!input.first_name?.trim()) errors.push('First name is required');
-  if (!input.last_name?.trim()) errors.push('Last name is required');
-  if (!input.email?.trim()) errors.push('Email is required');
-  if (!input.designation?.trim()) errors.push('Designation is required');
-  if (input.salary == null || input.salary === '') errors.push('Salary is required');
-  else if (Number(input.salary) < 1000) errors.push('Salary must be at least 1000');
-  if (!input.date_of_joining) errors.push('Date of joining is required');
-  if (!input.department?.trim()) errors.push('Department is required');
-  if (input.gender != null && input.gender !== '' && !GENDER_ENUM.includes(input.gender)) {
-    errors.push('Gender must be Male, Female, or Other');
+/** Map Mongoose validation/duplicate errors to UserInputError for consistent API responses. */
+function handleMongooseError(err) {
+  if (err.name === 'ValidationError') {
+    const errors = Object.values(err.errors).map((e) => e.message);
+    throw new UserInputError('Validation failed', { errors });
   }
-  if (errors.length) throw new UserInputError('Validation failed', { errors });
-}
-
-function validateUpdateEmployee(input) {
-  const errors = [];
-  if (input.salary != null && input.salary !== '' && Number(input.salary) < 1000) {
-    errors.push('Salary must be at least 1000');
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyPattern || {})[0] || 'field';
+    throw new UserInputError(`Duplicate value for ${field}`);
   }
-  if (input.gender != null && input.gender !== '' && !GENDER_ENUM.includes(input.gender)) {
-    errors.push('Gender must be Male, Female, or Other');
-  }
-  if (errors.length) throw new UserInputError('Validation failed', { errors });
-}
-
-function validateSignup({ username, email, password }) {
-  const errors = [];
-  if (!username?.trim()) errors.push('Username is required');
-  if (!email?.trim()) errors.push('Email is required');
-  if (!password) errors.push('Password is required');
-  else if (password.length < 6) errors.push('Password must be at least 6 characters');
-  if (errors.length) throw new UserInputError('Validation failed', { errors });
+  throw err;
 }
 
 const resolvers = {
   Query: {
     async login(_, { usernameOrEmail, password }) {
-      if (!usernameOrEmail?.trim() || !password) {
-        throw new UserInputError('Username/email and password are required');
-      }
-      const key = usernameOrEmail.trim();
+      const sanitized = await validateLoginInput({ usernameOrEmail, password });
+      const key = sanitized.usernameOrEmail.trim();
       const isEmail = key.includes('@');
       const user = await User.findOne(
         isEmail ? { email: key.toLowerCase() } : { username: key }
@@ -87,7 +67,7 @@ const resolvers = {
       if (!user) {
         throw new UserInputError('Invalid username/email or password');
       }
-      const valid = await bcrypt.compare(password, user.password);
+      const valid = await bcrypt.compare(sanitized.password, user.password);
       if (!valid) {
         throw new UserInputError('Invalid username/email or password');
       }
@@ -124,69 +104,78 @@ const resolvers = {
   },
   Mutation: {
     async signup(_, { input }) {
-      validateSignup(input);
-      const { username, email, password } = input;
+      const sanitized = await validateSignupInput(input);
+      const { username, email, password } = sanitized;
       const existing = await User.findOne({
-        $or: [{ username: username.trim() }, { email: email.trim().toLowerCase() }],
+        $or: [{ username }, { email }],
       });
       if (existing) {
         throw new UserInputError('Username or email already registered');
       }
       const hashed = await bcrypt.hash(password, 10);
-      const user = await User.create({
-        username: username.trim(),
-        email: email.trim().toLowerCase(),
-        password: hashed,
-      });
-      const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
-      return { token, user: toGraphQLUser(user) };
+      try {
+        const user = await User.create({ username, email, password: hashed });
+        const token = jwt.sign({ userId: user._id.toString() }, JWT_SECRET, { expiresIn: '7d' });
+        return { token, user: toGraphQLUser(user) };
+      } catch (err) {
+        handleMongooseError(err);
+      }
     },
 
     async addEmployee(_, { input }) {
-      validateAddEmployee(input);
-      const existing = await Employee.findOne({ email: input.email.trim().toLowerCase() });
+      const sanitized = await validateAddEmployeeInput(input);
+      const existing = await Employee.findOne({ email: sanitized.email });
       if (existing) {
         throw new UserInputError('Employee with this email already exists');
       }
-      const employee = await Employee.create({
-        first_name: input.first_name.trim(),
-        last_name: input.last_name.trim(),
-        email: input.email.trim().toLowerCase(),
-        gender: input.gender?.trim() || undefined,
-        designation: input.designation.trim(),
-        salary: Number(input.salary),
-        date_of_joining: new Date(input.date_of_joining),
-        department: input.department.trim(),
-        employee_photo: input.employee_photo?.trim() || null,
-      });
-      return toGraphQLEmployee(employee);
+      const payload = {
+        first_name: sanitized.first_name,
+        last_name: sanitized.last_name,
+        email: sanitized.email,
+        gender: sanitized.gender || undefined,
+        designation: sanitized.designation,
+        salary: sanitized.salary,
+        date_of_joining: new Date(sanitized.date_of_joining),
+        department: sanitized.department,
+        employee_photo: sanitized.employee_photo || null,
+      };
+      try {
+        const employee = await Employee.create(payload);
+        return toGraphQLEmployee(employee);
+      } catch (err) {
+        handleMongooseError(err);
+      }
     },
 
     async updateEmployeeByEid(_, { eid, input }) {
       if (!mongoose.Types.ObjectId.isValid(eid)) {
         throw new UserInputError('Invalid employee id');
       }
-      validateUpdateEmployee(input);
+      const sanitized = await validateUpdateEmployeeInput(input);
       const employee = await Employee.findById(eid);
       if (!employee) {
         throw new UserInputError('Employee not found');
       }
-      if (input.email?.trim() && input.email.trim().toLowerCase() !== employee.email) {
-        const existing = await Employee.findOne({ email: input.email.trim().toLowerCase() });
+      if (sanitized.email && sanitized.email !== employee.email) {
+        const existing = await Employee.findOne({ email: sanitized.email });
         if (existing) throw new UserInputError('Employee with this email already exists');
       }
       const updates = {};
-      if (input.first_name !== undefined) updates.first_name = input.first_name.trim();
-      if (input.last_name !== undefined) updates.last_name = input.last_name.trim();
-      if (input.email !== undefined) updates.email = input.email.trim().toLowerCase();
-      if (input.gender !== undefined) updates.gender = input.gender?.trim() || null;
-      if (input.designation !== undefined) updates.designation = input.designation.trim();
-      if (input.salary !== undefined) updates.salary = Number(input.salary);
-      if (input.date_of_joining !== undefined) updates.date_of_joining = new Date(input.date_of_joining);
-      if (input.department !== undefined) updates.department = input.department.trim();
-      if (input.employee_photo !== undefined) updates.employee_photo = input.employee_photo?.trim() || null;
-      const updated = await Employee.findByIdAndUpdate(eid, updates, { new: true, runValidators: true });
-      return toGraphQLEmployee(updated);
+      if (sanitized.first_name !== undefined) updates.first_name = sanitized.first_name;
+      if (sanitized.last_name !== undefined) updates.last_name = sanitized.last_name;
+      if (sanitized.email !== undefined) updates.email = sanitized.email;
+      if (sanitized.gender !== undefined) updates.gender = sanitized.gender || null;
+      if (sanitized.designation !== undefined) updates.designation = sanitized.designation;
+      if (sanitized.salary !== undefined) updates.salary = sanitized.salary;
+      if (sanitized.date_of_joining !== undefined) updates.date_of_joining = new Date(sanitized.date_of_joining);
+      if (sanitized.department !== undefined) updates.department = sanitized.department;
+      if (sanitized.employee_photo !== undefined) updates.employee_photo = sanitized.employee_photo || null;
+      try {
+        const updated = await Employee.findByIdAndUpdate(eid, updates, { new: true, runValidators: true });
+        return toGraphQLEmployee(updated);
+      } catch (err) {
+        handleMongooseError(err);
+      }
     },
 
     async deleteEmployeeByEid(_, { eid }) {

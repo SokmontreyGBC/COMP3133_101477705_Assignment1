@@ -20,6 +20,10 @@ const employeeSchema = new mongoose.Schema(
       unique: true,
       trim: true,
       lowercase: true,
+      validate: {
+        validator: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
+        message: 'Email must be a valid email address',
+      },
     },
     gender: {
       type: String,
